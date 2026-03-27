@@ -14,51 +14,27 @@ const SYSTEM_PROMPT = `You are Rich, the AI voice assistant for Cribtopia LLC. Y
 - Co-Founders: Theresa Yackel and Jeremy Page. Phone: 409-454-9038. Website: cribtopia.com
 - If caller is Theresa or Resa, be warm and personal like a friend.`;
 
-app.get('/', (req, res) => res.send('Cribtopia Voice Server v6 ✅'));
+app.get('/', (req, res) => res.send('Cribtopia Voice Server v7 ✅'));
 
-// Step 1: Answer and record caller
 app.post('/voice', (req, res) => {
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="Polly.Matthew-Neural">Hey, thanks for calling Cribtopia! This is Rich. Go ahead and speak after the beep.</Say>
-  <Record action="/transcribe" method="POST" maxLength="15" playBeep="true" trim="trim-silence" />
+  <Gather input="speech" action="/respond" method="POST" timeout="10" speechTimeout="auto" language="en-US">
+    <Say voice="Polly.Matthew-Neural">Hey, thanks for calling Cribtopia! This is Rich, how can I help you?</Say>
+  </Gather>
+  <Redirect>/voice</Redirect>
 </Response>`;
   res.type('text/xml').send(twiml);
 });
 
-// Step 2: Get recording, transcribe with Whisper, reply with GPT
-app.post('/transcribe', async (req, res) => {
-  const recordingUrl = req.body.RecordingUrl;
+app.post('/respond', async (req, res) => {
+  const callerSpeech = req.body.SpeechResult || '';
   const conversationHistory = req.body.conversationHistory || '';
-  console.log('Recording URL:', recordingUrl);
+  console.log('Caller said:', callerSpeech);
 
-  let callerSpeech = '';
-  let aiReply = "Sorry, I had trouble hearing that. Could you try again?";
+  let aiReply = "I'm having a little trouble on my end. Could you say that again?";
 
   try {
-    // Download the recording
-    const recordingResponse = await fetch(recordingUrl + '.mp3', {
-      headers: {
-        'Authorization': 'Basic ' + Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`).toString('base64')
-      }
-    });
-    const audioBuffer = await recordingResponse.arrayBuffer();
-    const audioBlob = new Blob([audioBuffer], { type: 'audio/mpeg' });
-
-    // Transcribe with Whisper
-    const formData = new FormData();
-    formData.append('file', audioBlob, 'audio.mp3');
-    formData.append('model', 'whisper-1');
-
-    const whisperRes = await fetch('https://api.openai.com/v1/audio/transcriptions', {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}` },
-      body: formData
-    });
-    const whisperData = await whisperRes.json();
-    callerSpeech = whisperData.text || '';
-    console.log('Whisper transcript:', callerSpeech);
-
     if (callerSpeech.trim().length > 0) {
       const messages = [{ role: 'system', content: SYSTEM_PROMPT }];
       if (conversationHistory) {
@@ -68,7 +44,10 @@ app.post('/transcribe', async (req, res) => {
 
       const gptRes = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
-        headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
+        headers: { 
+          'Authorization': `Bearer ${OPENAI_API_KEY}`, 
+          'Content-Type': 'application/json' 
+        },
         body: JSON.stringify({ model: 'gpt-4o-mini', messages, max_tokens: 80, temperature: 0.8 })
       });
       const gptData = await gptRes.json();
@@ -86,20 +65,23 @@ app.post('/transcribe', async (req, res) => {
 
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="Polly.Matthew-Neural">${safeReply}</Say>
-  <Record action="/transcribe?conversationHistory=${encodedHistory}" method="POST" maxLength="15" playBeep="true" trim="trim-silence" />
+  <Gather input="speech" action="/respond?conversationHistory=${encodedHistory}" method="POST" timeout="10" speechTimeout="auto" language="en-US">
+    <Say voice="Polly.Matthew-Neural">${safeReply}</Say>
+  </Gather>
+  <Redirect>/voice</Redirect>
 </Response>`;
     res.type('text/xml').send(twiml);
 
   } catch (err) {
-    console.error('Error:', err);
+    console.error('GPT Error:', err);
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="Polly.Matthew-Neural">Sorry about that. How can I help you with Cribtopia?</Say>
-  <Record action="/transcribe" method="POST" maxLength="15" playBeep="true" trim="trim-silence" />
+  <Gather input="speech" action="/respond" method="POST" timeout="10" speechTimeout="auto" language="en-US">
+    <Say voice="Polly.Matthew-Neural">Sorry about that. How can I help you with Cribtopia?</Say>
+  </Gather>
 </Response>`;
     res.type('text/xml').send(twiml);
   }
 });
 
-app.listen(PORT, () => console.log(`🚀 Cribtopia Voice Server v6 on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Cribtopia Voice Server v7 on port ${PORT}`));
