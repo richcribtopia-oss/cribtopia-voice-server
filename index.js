@@ -1,7 +1,4 @@
 const express = require('express');
-const http = require('http');
-const WebSocket = require('ws');
-
 const app = express();
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
@@ -9,141 +6,94 @@ app.use(express.json());
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const PORT = process.env.PORT || 8080;
 
-const SYSTEM_PROMPT = `You are Rich, the AI voice assistant for Cribtopia LLC. You help people on a live phone call.
-
-Your personality:
-- Warm, natural, conversational — like a real person
-- Keep responses SHORT — 1 to 2 sentences max on a phone call
-- Listen carefully and respond directly to what the person says
-- Calm, confident, friendly
-- Never say you are an AI unless directly asked
-
-About Cribtopia:
-- Tech platform that eliminates real estate agents entirely
-- Sellers list FREE, buyers submit offers online, contracts auto-generated
-- No commissions. No agents. FSBO reinvented for the modern era
-- Co-Founders: Theresa Yackel and Jeremy Page
-- Phone: 409-454-9038 | Website: cribtopia.com
-
-If the caller says they are Theresa, Resa, or the co-founder — be warm and personal like talking to a friend.`;
+const SYSTEM_PROMPT = `You are Rich, the AI voice assistant for Cribtopia LLC. You are on a live phone call.
+- Keep responses SHORT — 1 to 2 sentences max
+- Warm, natural, conversational
+- Never say you are an AI
+- About Cribtopia: Tech platform eliminating real estate agents. Sellers list FREE, buyers submit offers online, no commissions, no agents. FSBO reinvented.
+- Co-Founders: Theresa Yackel and Jeremy Page. Phone: 409-454-9038. Website: cribtopia.com
+- If caller is Theresa or Resa, be warm and personal like a friend.`;
 
 app.get('/', (req, res) => res.send('Cribtopia Voice Server running ✅'));
 
-// Twilio incoming call — start media stream
+// Initial call handler
 app.post('/voice', (req, res) => {
-  const host = req.headers.host;
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="Polly.Joanna">Please hold while I connect you to Rich, the Cribtopia AI assistant.</Say>
-  <Connect>
-    <Stream url="wss://${host}/stream" />
-  </Connect>
+  <Gather input="speech" action="/respond" method="POST" speechTimeout="auto" language="en-US">
+    <Say voice="Polly.Joanna">Hi, thanks for calling Cribtopia! I'm Rich, how can I help you today?</Say>
+  </Gather>
+  <Redirect>/voice</Redirect>
 </Response>`;
   res.type('text/xml').send(twiml);
 });
 
-// Create HTTP server with WebSocket upgrade support
-const server = http.createServer(app);
-const wss = new WebSocket.Server({ server, path: '/stream' });
+// Handle caller speech -> OpenAI -> respond
+app.post('/respond', async (req, res) => {
+  const callerSpeech = req.body.SpeechResult || '';
+  const conversationHistory = req.body.conversationHistory || '';
+  console.log('Caller said:', callerSpeech);
 
-wss.on('connection', (twilioWs) => {
-  console.log('📞 Call connected');
+  let aiReply = "I'm sorry, I didn't catch that. Could you repeat that?";
 
-  let openaiWs = null;
-  let streamSid = null;
+  try {
+    const messages = [
+      { role: 'system', content: SYSTEM_PROMPT }
+    ];
 
-  openaiWs = new WebSocket(
-    'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17',
-    {
+    // Add conversation history if any
+    if (conversationHistory) {
+      const history = JSON.parse(decodeURIComponent(conversationHistory));
+      messages.push(...history);
+    }
+
+    messages.push({ role: 'user', content: callerSpeech });
+
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
       headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-        'OpenAI-Beta': 'realtime=v1',
+        'Authorization': `Bearer ${OPENAI_API_KEY}`,
+        'Content-Type': 'application/json'
       },
-    }
-  );
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        messages,
+        max_tokens: 100,
+        temperature: 0.8
+      })
+    });
 
-  openaiWs.on('open', () => {
-    console.log('✅ OpenAI connected');
-    openaiWs.send(JSON.stringify({
-      type: 'session.update',
-      session: {
-        turn_detection: { type: 'server_vad' },
-        input_audio_format: 'g711_ulaw',
-        output_audio_format: 'g711_ulaw',
-        voice: 'alloy',
-        instructions: SYSTEM_PROMPT,
-        modalities: ['text', 'audio'],
-        temperature: 0.85,
-      }
-    }));
+    const data = await response.json();
+    aiReply = data.choices?.[0]?.message?.content || aiReply;
+    console.log('AI reply:', aiReply);
 
-    // Trigger greeting
-    openaiWs.send(JSON.stringify({
-      type: 'conversation.item.create',
-      item: {
-        type: 'message',
-        role: 'user',
-        content: [{ type: 'input_text', text: 'The call just connected. Say a short warm greeting as Rich from Cribtopia.' }]
-      }
-    }));
-    openaiWs.send(JSON.stringify({ type: 'response.create' }));
-  });
+    // Update history
+    const history = conversationHistory ? JSON.parse(decodeURIComponent(conversationHistory)) : [];
+    history.push({ role: 'user', content: callerSpeech });
+    history.push({ role: 'assistant', content: aiReply });
+    // Keep last 10 messages only
+    const trimmed = history.slice(-10);
+    const encodedHistory = encodeURIComponent(JSON.stringify(trimmed));
 
-  openaiWs.on('message', (data) => {
-    try {
-      const event = JSON.parse(data);
+    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Gather input="speech" action="/respond?conversationHistory=${encodedHistory}" method="POST" speechTimeout="auto" language="en-US">
+    <Say voice="Polly.Joanna">${aiReply.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</Say>
+  </Gather>
+  <Redirect>/voice</Redirect>
+</Response>`;
+    res.type('text/xml').send(twiml);
 
-      if (event.type === 'response.audio.delta' && event.delta) {
-        if (streamSid && twilioWs.readyState === WebSocket.OPEN) {
-          twilioWs.send(JSON.stringify({
-            event: 'media',
-            streamSid,
-            media: { payload: event.delta }
-          }));
-        }
-      }
-
-      if (event.type === 'error') {
-        console.error('OpenAI error:', JSON.stringify(event.error));
-      }
-    } catch(e) {
-      console.error('Parse error:', e);
-    }
-  });
-
-  openaiWs.on('error', (err) => console.error('OpenAI WS error:', err.message));
-  openaiWs.on('close', (code, reason) => console.log('OpenAI WS closed:', code, reason?.toString()));
-
-  twilioWs.on('message', (data) => {
-    try {
-      const msg = JSON.parse(data);
-      if (msg.event === 'start') {
-        streamSid = msg.start.streamSid;
-        console.log('Stream started:', streamSid);
-      }
-      if (msg.event === 'media' && openaiWs?.readyState === WebSocket.OPEN) {
-        openaiWs.send(JSON.stringify({
-          type: 'input_audio_buffer.append',
-          audio: msg.media.payload
-        }));
-      }
-      if (msg.event === 'stop') {
-        console.log('Call ended');
-        openaiWs?.close();
-      }
-    } catch(e) {
-      console.error('Twilio parse error:', e);
-    }
-  });
-
-  twilioWs.on('close', () => {
-    console.log('Twilio disconnected');
-    openaiWs?.close();
-  });
-
-  twilioWs.on('error', (err) => console.error('Twilio WS error:', err.message));
+  } catch (err) {
+    console.error('Error:', err);
+    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Gather input="speech" action="/respond" method="POST" speechTimeout="auto" language="en-US">
+    <Say voice="Polly.Joanna">${aiReply}</Say>
+  </Gather>
+</Response>`;
+    res.type('text/xml').send(twiml);
+  }
 });
 
-server.listen(PORT, () => {
-  console.log(`🚀 Cribtopia Voice Server on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`🚀 Cribtopia Voice Server on port ${PORT}`));
