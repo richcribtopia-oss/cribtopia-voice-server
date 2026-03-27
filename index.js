@@ -14,37 +14,38 @@ const SYSTEM_PROMPT = `You are Rich, the AI voice assistant for Cribtopia LLC. Y
 - Co-Founders: Theresa Yackel and Jeremy Page. Phone: 409-454-9038. Website: cribtopia.com
 - If caller is Theresa or Resa, be warm and personal like a friend.`;
 
-app.get('/', (req, res) => res.send('Cribtopia Voice Server running ✅'));
+app.get('/', (req, res) => res.send('Cribtopia Voice Server running v5 ✅'));
 
-// Initial call handler
 app.post('/voice', (req, res) => {
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Gather input="speech" action="/respond" method="POST" speechTimeout="3" speechModel="phone_call" enhanced="true" language="en-US">
-    <Say voice="Polly.Matthew-Neural">Hey, thanks for calling Cribtopia! This is Rich — how can I help you today?</Say>
+  <Gather input="speech" action="/respond" method="POST" timeout="10" speechTimeout="auto" language="en-US">
+    <Say voice="Polly.Matthew-Neural">Hey, thanks for calling Cribtopia! This is Rich, how can I help you?</Say>
   </Gather>
   <Redirect>/voice</Redirect>
 </Response>`;
   res.type('text/xml').send(twiml);
 });
 
-// Handle caller speech -> OpenAI -> respond
 app.post('/respond', async (req, res) => {
   const callerSpeech = req.body.SpeechResult || '';
   const conversationHistory = req.body.conversationHistory || '';
-  console.log('Caller said:', callerSpeech);
+  console.log('Caller said:', JSON.stringify(callerSpeech));
+  console.log('Full body:', JSON.stringify(req.body));
 
-  let aiReply = "Sorry, I didn't catch that — could you say that again?";
+  let aiReply = "I'm having a little trouble hearing you. Could you try speaking a bit louder?";
 
   try {
-    const messages = [{ role: 'system', content: SYSTEM_PROMPT }];
+    if (callerSpeech && callerSpeech.trim().length > 0) {
+      const messages = [{ role: 'system', content: SYSTEM_PROMPT }];
 
-    if (conversationHistory) {
-      const history = JSON.parse(decodeURIComponent(conversationHistory));
-      messages.push(...history);
-    }
+      if (conversationHistory) {
+        try {
+          const history = JSON.parse(decodeURIComponent(conversationHistory));
+          messages.push(...history);
+        } catch(e) {}
+      }
 
-    if (callerSpeech) {
       messages.push({ role: 'user', content: callerSpeech });
 
       const response = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -73,12 +74,11 @@ app.post('/respond', async (req, res) => {
     }
     const trimmed = history.slice(-10);
     const encodedHistory = encodeURIComponent(JSON.stringify(trimmed));
-
     const safeReply = aiReply.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Gather input="speech" action="/respond?conversationHistory=${encodedHistory}" method="POST" speechTimeout="3" speechModel="phone_call" enhanced="true" language="en-US">
+  <Gather input="speech" action="/respond?conversationHistory=${encodedHistory}" method="POST" timeout="10" speechTimeout="auto" language="en-US">
     <Say voice="Polly.Matthew-Neural">${safeReply}</Say>
   </Gather>
   <Redirect>/voice</Redirect>
@@ -89,12 +89,12 @@ app.post('/respond', async (req, res) => {
     console.error('Error:', err);
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Gather input="speech" action="/respond" method="POST" speechTimeout="3" speechModel="phone_call" enhanced="true" language="en-US">
-    <Say voice="Polly.Matthew-Neural">${aiReply}</Say>
+  <Gather input="speech" action="/respond" method="POST" timeout="10" speechTimeout="auto" language="en-US">
+    <Say voice="Polly.Matthew-Neural">Sorry about that, let me try again. How can I help you?</Say>
   </Gather>
 </Response>`;
     res.type('text/xml').send(twiml);
   }
 });
 
-app.listen(PORT, () => console.log(`🚀 Cribtopia Voice Server on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Cribtopia Voice Server v5 on port ${PORT}`));
