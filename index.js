@@ -1,6 +1,6 @@
 const express = require('express');
-const WebSocket = require('ws');
 const http = require('http');
+const WebSocket = require('ws');
 
 const app = express();
 app.use(express.urlencoded({ extended: false }));
@@ -9,14 +9,14 @@ app.use(express.json());
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const PORT = process.env.PORT || 8080;
 
-const SYSTEM_PROMPT = `You are Rich, the AI voice assistant for Cribtopia LLC. You are on a live phone call.
+const SYSTEM_PROMPT = `You are Rich, the AI voice assistant for Cribtopia LLC. You help people on a live phone call.
 
 Your personality:
 - Warm, natural, conversational — like a real person
 - Keep responses SHORT — 1 to 2 sentences max on a phone call
 - Listen carefully and respond directly to what the person says
-- Calm, confident, a little personality
-- Never say you are an AI
+- Calm, confident, friendly
+- Never say you are an AI unless directly asked
 
 About Cribtopia:
 - Tech platform that eliminates real estate agents entirely
@@ -25,16 +25,16 @@ About Cribtopia:
 - Co-Founders: Theresa Yackel and Jeremy Page
 - Phone: 409-454-9038 | Website: cribtopia.com
 
-IMPORTANT: If the caller says they are Theresa, Resa, or the co-founder — drop the pitch completely and be warm and personal like talking to a friend.`;
+If the caller says they are Theresa, Resa, or the co-founder — be warm and personal like talking to a friend.`;
 
-// Health check
 app.get('/', (req, res) => res.send('Cribtopia Voice Server running ✅'));
 
-// Twilio webhook — incoming or outbound call answer
+// Twilio incoming call — start media stream
 app.post('/voice', (req, res) => {
   const host = req.headers.host;
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
+  <Say voice="Polly.Joanna">Please hold while I connect you to Rich, the Cribtopia AI assistant.</Say>
   <Connect>
     <Stream url="wss://${host}/stream" />
   </Connect>
@@ -42,20 +42,16 @@ app.post('/voice', (req, res) => {
   res.type('text/xml').send(twiml);
 });
 
-// Create HTTP server
+// Create HTTP server with WebSocket upgrade support
 const server = http.createServer(app);
-
-// WebSocket server for Twilio Media Streams
 const wss = new WebSocket.Server({ server, path: '/stream' });
 
 wss.on('connection', (twilioWs) => {
-  console.log('📞 New call connected');
+  console.log('📞 Call connected');
 
   let openaiWs = null;
   let streamSid = null;
-  let callStarted = false;
 
-  // Connect to OpenAI Realtime API
   openaiWs = new WebSocket(
     'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17',
     {
@@ -67,9 +63,7 @@ wss.on('connection', (twilioWs) => {
   );
 
   openaiWs.on('open', () => {
-    console.log('🤖 OpenAI Realtime connected');
-
-    // Configure the session
+    console.log('✅ OpenAI connected');
     openaiWs.send(JSON.stringify({
       type: 'session.update',
       session: {
@@ -83,68 +77,73 @@ wss.on('connection', (twilioWs) => {
       }
     }));
 
-    // Send initial greeting
+    // Trigger greeting
     openaiWs.send(JSON.stringify({
       type: 'conversation.item.create',
       item: {
         type: 'message',
         role: 'user',
-        content: [{ type: 'input_text', text: 'The call just connected. Greet the caller warmly and briefly introduce yourself as Rich from Cribtopia.' }]
+        content: [{ type: 'input_text', text: 'The call just connected. Say a short warm greeting as Rich from Cribtopia.' }]
       }
     }));
     openaiWs.send(JSON.stringify({ type: 'response.create' }));
   });
 
   openaiWs.on('message', (data) => {
-    const event = JSON.parse(data);
+    try {
+      const event = JSON.parse(data);
 
-    if (event.type === 'response.audio.delta' && event.delta) {
-      // Stream audio back to Twilio
-      if (streamSid && twilioWs.readyState === WebSocket.OPEN) {
-        twilioWs.send(JSON.stringify({
-          event: 'media',
-          streamSid,
-          media: { payload: event.delta }
-        }));
+      if (event.type === 'response.audio.delta' && event.delta) {
+        if (streamSid && twilioWs.readyState === WebSocket.OPEN) {
+          twilioWs.send(JSON.stringify({
+            event: 'media',
+            streamSid,
+            media: { payload: event.delta }
+          }));
+        }
       }
-    }
 
-    if (event.type === 'response.audio_transcript.delta') {
-      process.stdout.write(event.delta || '');
+      if (event.type === 'error') {
+        console.error('OpenAI error:', JSON.stringify(event.error));
+      }
+    } catch(e) {
+      console.error('Parse error:', e);
     }
   });
 
-  openaiWs.on('error', (err) => console.error('OpenAI WS error:', err));
-  openaiWs.on('close', () => console.log('OpenAI WS closed'));
+  openaiWs.on('error', (err) => console.error('OpenAI WS error:', err.message));
+  openaiWs.on('close', (code, reason) => console.log('OpenAI WS closed:', code, reason?.toString()));
 
-  // Handle messages from Twilio
   twilioWs.on('message', (data) => {
-    const msg = JSON.parse(data);
-
-    if (msg.event === 'start') {
-      streamSid = msg.start.streamSid;
-      console.log('Stream started:', streamSid);
-    }
-
-    if (msg.event === 'media' && openaiWs && openaiWs.readyState === WebSocket.OPEN) {
-      openaiWs.send(JSON.stringify({
-        type: 'input_audio_buffer.append',
-        audio: msg.media.payload
-      }));
-    }
-
-    if (msg.event === 'stop') {
-      console.log('Call ended');
-      if (openaiWs) openaiWs.close();
+    try {
+      const msg = JSON.parse(data);
+      if (msg.event === 'start') {
+        streamSid = msg.start.streamSid;
+        console.log('Stream started:', streamSid);
+      }
+      if (msg.event === 'media' && openaiWs?.readyState === WebSocket.OPEN) {
+        openaiWs.send(JSON.stringify({
+          type: 'input_audio_buffer.append',
+          audio: msg.media.payload
+        }));
+      }
+      if (msg.event === 'stop') {
+        console.log('Call ended');
+        openaiWs?.close();
+      }
+    } catch(e) {
+      console.error('Twilio parse error:', e);
     }
   });
 
   twilioWs.on('close', () => {
-    console.log('Twilio WS closed');
-    if (openaiWs) openaiWs.close();
+    console.log('Twilio disconnected');
+    openaiWs?.close();
   });
+
+  twilioWs.on('error', (err) => console.error('Twilio WS error:', err.message));
 });
 
 server.listen(PORT, () => {
-  console.log(`🚀 Cribtopia Voice Server running on port ${PORT}`);
+  console.log(`🚀 Cribtopia Voice Server on port ${PORT}`);
 });
